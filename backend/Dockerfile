@@ -5,24 +5,23 @@ FROM node:18-alpine AS builder
 WORKDIR /app
 
 # Install dependencies
-COPY package.json pnpm-lock.yaml ./
-RUN npm install -g pnpm && pnpm install
+COPY package.json ./
+RUN npm install
 
 # Copy source code
 COPY . .
 
 # Build application
-RUN pnpm run build
+RUN npm run build
 
 # Production stage
 FROM node:18-alpine
 
 WORKDIR /app
 
-# Install pnpm and production dependencies
-RUN npm install -g pnpm
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --prod
+# Install production dependencies
+COPY package.json ./
+RUN npm install --omit=dev
 
 # Copy built application from builder
 COPY --from=builder /app/dist ./dist
