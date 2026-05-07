@@ -1,0 +1,64 @@
+# Fly.io Configuration for CCNA Platform
+app = "ccna-platform"
+primary_region = "iad"
+
+# Build configuration
+[build]
+  dockerfile = "Dockerfile"
+  args = { "NODE_ENV" = "production" }
+
+# HTTP service configuration
+[http_service]
+  internal_port = 3001
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "15s"
+    method = "GET"
+    path = "/health"
+    protocol = "http"
+    timeout = "5s"
+    type = "http"
+
+# Environment variables
+[env]
+  NODE_ENV = "production"
+  LOG_LEVEL = "info"
+  PORT = "3001"
+
+# Machines configuration
+[[services]]
+  internal_port = 3001
+  protocol = "tcp"
+  
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+
+# Mounted volumes for persistence
+[[mounts]]
+  source = "data"
+  destination = "/app/data"
+  initial_size = "10gb"
+
+# Metrics and monitoring
+[metrics]
+  port = 9090
+
+# Auto-scaling configuration
+[env]
+  MIN_INSTANCES = "2"
+  MAX_INSTANCES = "5"
+
+# Stickiness (for session affinity, optional)
+[http_service.stickiness]
+  header = "Cookie"
+  table_name = "ccna_sessions"
+
+# Process monitoring
+[processes]
+  app = "node dist/main.js"
+  migration = "npx prisma migrate deploy && node dist/main.js"

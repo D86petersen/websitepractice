@@ -1,0 +1,381 @@
+// Prisma Schema for CCNA Practice Exam Platform
+// PostgreSQL database with full normalization and audit fields
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================================================
+// USER MANAGEMENT
+// ============================================================================
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique @db.VarChar(255)
+  passwordHash     String    @db.VarChar(255)
+  role             UserRole  @default(STUDENT)
+  targetExamDate   DateTime? // when user plans to take real exam
+  timezone         String    @default("UTC")
+  currentGoalScore Int?      // e.g., 825 equivalent on 300-1000 scale
+
+  // Relations
+  examSessions     UserExamSession[]
+  questionsCreated Question[]
+  examFormsCreated ExamForm[]
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([email])
+  @@map("users")
+}
+
+enum UserRole {
+  STUDENT
+  ADMIN
+}
+
+// ============================================================================
+// EXAM BLUEPRINTS & DOMAINS
+// ============================================================================
+
+model ExamBlueprint {
+  id          String   @id @default(cuid())
+  name        String   @db.VarChar(255) // e.g., "CCNA 200-301 v1.1 2026"
+  description String   @db.Text
+  effectiveFrom DateTime
+  effectiveTo DateTime?
+  isActive    Boolean  @default(true)
+
+  // JSON field: domain weights, e.g., { "network_fundamentals": 0.20, ... }
+  domainWeights Json
+
+  // Relations
+  domains         Domain[]
+  questions       Question[]
+  examForms       ExamForm[]
+  examSessions    UserExamSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@index([effectiveFrom])
+  @@map("exam_blueprints")
+}
+
+model Domain {
+  id          String  @id @default(cuid())
+  blueprintId String
+  blueprint   ExamBlueprint @relation(fields: [blueprintId], references: [id], onDelete: Cascade)
+
+  // Domain key must be one of the 6 CCNA domains
+  key         DomainKey // NETWORK_FUNDAMENTALS, NETWORK_ACCESS, etc.
+  name        String    @db.VarChar(255) // e.g., "Network Fundamentals"
+  weight      Float     @db.Decimal(3, 2) // 0.00 to 1.00
+
+  // Relations
+  subObjectives SubObjective[]
+  questions     Question[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([blueprintId, key])
+  @@index([blueprintId])
+  @@map("domains")
+}
+
+enum DomainKey {
+  NETWORK_FUNDAMENTALS
+  NETWORK_ACCESS
+  IP_CONNECTIVITY
+  IP_SERVICES
+  SECURITY_FUNDAMENTALS
+  AUTOMATION_PROGRAMMABILITY
+}
+
+model SubObjective {
+  id        String @id @default(cuid())
+  domainId  String
+  domain    Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  code        String @db.VarChar(20) // e.g., "1.6"
+  description String @db.Text       // e.g., "Configure and verify IPv4 addressing and subnetting"
+
+  // Relations
+  questions Question[]
+
+  createdAt DateTime @default(now())
+
+  @@index([domainId])
+  @@map("sub_objectives")
+}
+
+// ============================================================================
+// QUESTIONS & ANSWERS
+// ============================================================================
+
+model Question {
+  id              String @id @default(cuid())
+  blueprintId     String
+  blueprint       ExamBlueprint @relation(fields: [blueprintId], references: [id], onDelete: Cascade)
+  domainId        String
+  domain          Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  subObjectiveId  String?
+  subObjective    SubObjective? @relation(fields: [subObjectiveId], references: [id], onDelete: SetNull)
+
+  stem        String     @db.Text // question text or markdown
+  type        QuestionType
+  difficulty  Int        @db.SmallInt // 1-5 scale
+  isActive    Boolean    @default(true)
+
+  createdBy   String
+  createdByUser User @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+
+  // Relations
+  answerOptions     AnswerOption[]
+  explanation       QuestionExplanation?
+  examFormQuestions ExamFormQuestion[]
+  userResponses     UserResponse[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([blueprintId])
+  @@index([domainId])
+  @@index([isActive])
+  @@index([difficulty])
+  @@map("questions")
+}
+
+enum QuestionType {
+  SINGLE_CHOICE
+  MULTI_SELECT
+  DRAG_DROP_BASIC
+  SHORT_ANSWER
+}
+
+model AnswerOption {
+  id          String @id @default(cuid())
+  questionId  String
+  question    Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  text                  String  @db.Text
+  isCorrect             Boolean
+  orderIndex            Int
+  explanationOverride   String? @db.Text // optional distractor-specific feedback
+
+  // Relations
+  userResponses UserResponseOption[]
+
+  @@unique([questionId, orderIndex])
+  @@index([questionId])
+  @@map("answer_options")
+}
+
+model QuestionExplanation {
+  questionId      String  @id
+  question        Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  explanationMarkdown String @db.Text
+  referenceLinks      Json   // array of URLs
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("question_explanations")
+}
+
+// ============================================================================
+// EXAM FORMS (Exam Versions - Fixed & Dynamic)
+// ============================================================================
+
+model ExamForm {
+  id              String @id @default(cuid())
+  blueprintId     String
+  blueprint       ExamBlueprint @relation(fields: [blueprintId], references: [id], onDelete: Cascade)
+
+  name            String  @db.VarChar(255) // e.g., "Full CCNA Simulation v2026.1"
+  mode            ExamFormMode // FIXED or DYNAMIC
+  questionCount   Int
+  timeLimitMinutes Int
+  isPublic        Boolean @default(true)
+
+  // JSON field for dynamic form rules:
+  // {
+  //   "domainWeights": { "network_fundamentals": 0.20, ... },
+  //   "difficultyMix": { "easy": 0.20, "medium": 0.60, "hard": 0.20 },
+  //   "questionTypes": ["SINGLE_CHOICE", "MULTI_SELECT"],
+  //   "allowedSubObjectives": ["1.1", "1.2", ...] or null for all
+  // }
+  rulesJson Json?
+
+  createdBy       String
+  createdByUser   User @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+
+  // Relations
+  examFormQuestions ExamFormQuestion[]
+  examSessions      UserExamSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([blueprintId])
+  @@index([isPublic])
+  @@map("exam_forms")
+}
+
+enum ExamFormMode {
+  FIXED
+  DYNAMIC
+}
+
+model ExamFormQuestion {
+  examFormId String
+  examForm   ExamForm @relation(fields: [examFormId], references: [id], onDelete: Cascade)
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  orderIndex Int
+
+  @@id([examFormId, questionId])
+  @@unique([examFormId, orderIndex])
+  @@index([examFormId])
+  @@map("exam_form_questions")
+}
+
+// ============================================================================
+// USER EXAM SESSIONS & RESPONSES
+// ============================================================================
+
+model UserExamSession {
+  id            String @id @default(cuid())
+  userId        String?
+  user          User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  examFormId    String
+  examForm      ExamForm @relation(fields: [examFormId], references: [id], onDelete: Restrict)
+  blueprintId   String
+  blueprint     ExamBlueprint @relation(fields: [blueprintId], references: [id], onDelete: Restrict)
+
+  mode          ExamSessionMode
+  dynamicSeed   String? // for reproducible dynamic exam generation
+
+  startedAt     DateTime
+  completedAt   DateTime?
+
+  totalScorePercent Float?  // 0-100, or null if not completed
+  passFail      PassFail?   // PASS or FAIL, null if not completed
+  scoreScale    Int?        // estimated score on 300-1000 scale (informational only)
+
+  // JSON field: per-domain scores
+  // {"network_fundamentals": 75.0, "network_access": 80.0, ...}
+  domainScores  Json?
+
+  rawCorrectCount Int @default(0)
+  rawTotalCount   Int @default(0)
+
+  // Relations
+  userResponses UserResponse[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([examFormId])
+  @@index([startedAt])
+  @@map("user_exam_sessions")
+}
+
+enum ExamSessionMode {
+  SIMULATION
+  STUDY
+}
+
+enum PassFail {
+  PASS
+  FAIL
+}
+
+model UserResponse {
+  id            String @id @default(cuid())
+  sessionId     String
+  session       UserExamSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  questionId    String
+  question      Question @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  // JSON array of selected AnswerOption IDs
+  selectedOptionIds Json
+
+  // For short-answer questions
+  freeTextAnswer String? @db.Text
+
+  // null until final scoring or immediate in STUDY mode
+  isCorrect  Boolean?
+
+  responseTimeMs Int // milliseconds from question display to answer submission
+  viewedExplanation Boolean @default(false) // for STUDY mode tracking
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  selectedOptions UserResponseOption[]
+
+  @@index([sessionId])
+  @@index([questionId])
+  @@map("user_responses")
+}
+
+model UserResponseOption {
+  responseId   String
+  response     UserResponse @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  optionId     String
+  option       AnswerOption @relation(fields: [optionId], references: [id], onDelete: Restrict)
+
+  @@id([responseId, optionId])
+  @@index([responseId])
+  @@map("user_response_options")
+}
+
+// ============================================================================
+// ANALYTICS & AUDIT (Optional but Recommended)
+// ============================================================================
+
+model UserPerformanceSnapshot {
+  id          String @id @default(cuid())
+  userId      String
+  // Denormalized from UserExamSession for fast analytics queries
+  // Stores: total exams taken, average score per domain, weak areas, etc.
+
+  examsCompleted Int @default(0)
+  averageScore   Float?
+
+  // JSON: { "network_fundamentals": { "avg": 75.0, "attempts": 5 }, ... }
+  domainStats   Json?
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId])
+  @@map("user_performance_snapshots")
+}
+
+model AuditLog {
+  id        String @id @default(cuid())
+  userId    String?
+  action    String @db.VarChar(100) // "user_login", "exam_started", "exam_completed", etc.
+  resource  String @db.VarChar(100) // "user", "exam_session", "question", etc.
+  resourceId String? @db.VarChar(50)
+  details   Json?  // additional context
+  ipAddress String? @db.VarChar(45)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
