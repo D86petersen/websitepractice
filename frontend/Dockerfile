@@ -2,13 +2,13 @@
 # Multi-stage build for optimal image size
 FROM node:18-alpine AS deps
 WORKDIR /app
-COPY package.json pnpm-lock.yaml ./
-RUN npm install -g pnpm && pnpm install --frozen-lockfile
+COPY package.json ./
+RUN npm install
 
 # Builder stage
 FROM node:18-alpine AS builder
 WORKDIR /app
-COPY package.json pnpm-lock.yaml ./
+COPY package.json ./
 COPY --from=deps /app/node_modules ./node_modules
 
 ARG NEXT_PUBLIC_API_URL=http://localhost:3001/api/v1
@@ -16,7 +16,7 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NODE_ENV=production
 
 COPY . .
-RUN npm install -g pnpm && pnpm run build
+RUN npm run build
 
 # Production runner
 FROM node:18-alpine AS runner
